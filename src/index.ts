@@ -1,9 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 import rimraf from 'rimraf';
+import glob from 'glob';
 import mkdirp from 'mkdirp';
 import chalk from 'chalk';
-import glob from 'glob';
 import ora from 'ora';
 import yargs from 'yargs-parser';
 import resolveFrom from 'resolve-from';
@@ -28,6 +28,7 @@ export interface DependencyLoc {
 
 export interface InstallOptions {
   destLoc: string;
+  exclude?: string | string[];
   include?: string;
   isCleanInstall?: boolean;
   isStrict?: boolean;
@@ -36,6 +37,7 @@ export interface InstallOptions {
   hasBrowserlistConfig?: boolean;
   isExplicit?: boolean;
   namedExports?: {[filepath: string]: string[]};
+  nomodule?: string;
   remoteUrl?: string;
   remotePackages: [string, string][];
   sourceMap?: boolean | 'inline';
@@ -65,6 +67,7 @@ ${chalk.bold('Advanced:')}
     --remote-package    "name,version" pair(s) of packages that should be left unbundled and referenced remotely.
                         Example: "foo,v4" will rewrite all imports of "foo" to "{remoteUrl}/foo/v4" (see --remote-url).
     --remote-url        Configures the domain where remote imports point to (default: "https://cdn.pika.dev")
+    --nomodule          Specify filename for <script nomodule> for older browsers
     `.trim(),
   );
 }
@@ -167,13 +170,16 @@ export async function install(
   {
     isCleanInstall,
     destLoc,
+    exclude,
     hasBrowserlistConfig,
+    include,
     isExplicit,
     isStrict,
     isBabel,
     isOptimized,
     sourceMap,
     namedExports,
+    nomodule,
     remoteUrl,
     remotePackages,
     dedupe,
@@ -326,6 +332,28 @@ export async function install(
     };
     const packageBundle = await rollup.rollup(inputOptions);
     await packageBundle.write(outputOptions);
+
+    if (include && nomodule) {
+      // Resolve `/web_modules/` relative to package.json rather than system root
+      function renameImportPlugin() {
+        return {
+          name: 'rename-import-plugin',
+          resolveId(source) {
+            if (source.startsWith(path.sep)) {
+              return {id: source.replace(path.sep, path.join(cwd, path.sep))};
+            }
+            return null; // null means don’t rename
+          },
+        };
+      }
+      const noModuleBundle = await rollup.rollup({
+        input: glob.sync(include, {ignore: exclude})[0], // Note: this isn’t a good substitute for an entry file
+        plugins: [...inputOptions.plugins, renameImportPlugin()],
+      });
+      await noModuleBundle.write({file: nomodule, format: 'iife'});
+      spinner.info(`${chalk.bold('snowpack')} created nomodule bundle: ${nomodule}`);
+    }
+
     fs.writeFileSync(
       path.join(destLoc, 'import-map.json'),
       JSON.stringify({imports: importMap}, undefined, 2),
@@ -345,8 +373,9 @@ export async function cli(args: string[]) {
     sourceMap,
     babel = false,
     exclude = ['**/__tests__/*', '**/*.@(spec|test).@(js|mjs)'],
-    optimize = false,
     include,
+    nomodule,
+    optimize = false,
     strict = false,
     clean = false,
     dest = 'web_modules',
@@ -407,11 +436,14 @@ export async function cli(args: string[]) {
   const result = await install(installTargets, {
     isCleanInstall: clean,
     destLoc,
+    exclude,
     namedExports,
+    include,
     isExplicit,
     isStrict: strict,
     isBabel: babel || optimize,
     isOptimized: optimize,
+    nomodule,
     sourceMap,
     remoteUrl,
     hasBrowserlistConfig,
